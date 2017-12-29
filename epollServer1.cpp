@@ -71,7 +71,7 @@ void do_epoll(int listenfd)
 				if(nw==-1) // EPOLLERR 是否排除错误？？
 				{
 					fprintf(stderr, "read error: %s", strerror(errno));
-					
+					// 删除 该 读事件
 				}
 				// 一种做法，写到stdout，写回fd
 				// 一种做法： 将fd添加为 等待写事件
@@ -82,10 +82,18 @@ void do_epoll(int listenfd)
 				if(nw==-1)
 				{
 					fprintf(stderr, "write error: %s", strerror(errno));
+					// 删除 该 写事件
 				}
 				else if(nw<nr)
 				{
 					// 如何处理？ 自定义 应用层buffer
+				}
+				else
+				{
+					// 将 写事件 改成读事件
+					evt.events=EPOLLIN;
+					evt.data.fd=connfd;
+					epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &evt);
 				}
 			}
 			else // ？？
