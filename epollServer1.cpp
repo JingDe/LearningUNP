@@ -5,6 +5,13 @@
 const static int epollsize=50;
 const static int EPOLLEVENTS=50;
 
+// 应用层buffer 
+class Buffer{
+private:
+	std::vector<char> data_;
+	
+};
+
 void do_epoll(int listenfd)
 {
 	int efd;
@@ -13,7 +20,8 @@ void do_epoll(int listenfd)
 	struct sockadd_in addr;
 	int addrlen=sizeof(addr);
 	struct epoll_event evt;
-	char buf[512];
+	//char buf[512];
+	Buffer buf
 	
 	
 	efd=epoll_create(epollsize);
@@ -74,11 +82,15 @@ void do_epoll(int listenfd)
 					// 删除 该 读事件
 				}
 				// 一种做法，写到stdout，写回fd
-				// 一种做法： 将fd添加为 等待写事件
+				// 一种做法： 将fd添加为 等待写事件, 写回fd
+				evt.events=EPOLLOUT;
+				evt.data.fd=fd;
+				epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
 			}
 			else if(evts  & EPOLLOUT) // 连接上数据可写
 			{
 				ssize_t nw=write(fd, buf, nr);
+				ssize_t nw=write();
 				if(nw==-1)
 				{
 					fprintf(stderr, "write error: %s", strerror(errno));
