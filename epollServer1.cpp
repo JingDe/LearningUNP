@@ -1,39 +1,18 @@
 
+#include"Buffer2.h"
 #include<sys/epoll.h>
 #include<string.h>
 
-const static int epollsize=50;
-const static int EPOLLEVENTS=50;
 
-// 应用层buffer 
-class Buffer{
-public:
-	Buffer():data_(vector<char>){}
-	
-	char* data()
-	{ return &*data_.begin(); } 
-	const char* data() const
-	{ return &*data_.begin(); } // iterator begin();
-	size_t size()
-	{ return data_.size(); }
-	
-	void retrieve(const ch
-	void append(const char* data, size_t len);
-	
-	void readFd(int fd); // // muduo 的readFd 采用 另外分配足够大的 char buf[], 使用 readv 读取
-	// 另一种做法， 调用 ioctl FIONREAD 获得 缓冲区有多少字节
-	
-private:
-	std::vector<char> data_;
-	
-};
+const static int EPOLLEVENTS=50;
+const static int SERV_PORT=2018;
 
 // 实现 Read 和Write 函数
-ssize_t Read(int fd, Buffer &buf); // Buffer *buf
-ssize_t Write(int fd, Buffer &buf, int n); // Buffer *buf
+ssize_t Recv(int fd, Buffer &buf); // Buffer *buf
+ssize_t Send(int fd, Buffer &buf, int n); // Buffer *buf
 
 /*
-ssize_t Read(int fd, Buffer &buf)
+ssize_t Recv(int fd, Buffer &buf)
 {
 	char b[512];
 	int nr, tr;
@@ -54,14 +33,53 @@ ssize_t Read(int fd, Buffer &buf)
 }*/
 
 // 减少 拷贝
-ssize_t Read(int fd, Buffer &buf) 
+ssize_t Recv(int fd, Buffer &buf) // 此函数 可以 用 Buffer.readFd() 替代，main函数中 调用Read() 或 readFd() 
 {
 	// muduo 采用 inputBuffer_.readFd(channel_->fd(), &savedErrno)
+	// muduo 的readFd 采用 另外分配足够大的 char extrabuf[65535], 使用 readv 读取
+	// 另一种做法， 先调用 ioctl FIONREAD读取硬件状态寄存器的数值, 获得 缓冲区有多少字节，决定是否需要extrabuf
+	int nbytes;
+	int ret=ioctl(fd, FIONREAD, &nbytes);
+	char *extrabuf;
+	int ivcnt;
+	if(ret<0) // ??ioctl何时失败
+	{
+		// 读到extrabuf 再append到buf
+		// 采用 muduo做法
+		extrabuf=new char[65535];
+		ivcnt=2;
+	}
+	else if(nbytes<buf.writableSize())
+	{
+		ivcnt=1;
+	}
+	else
+	{
+		extrabuf=new char[nbytes];
+		ivcnt=2;
+	}
+	struct iovec ivec[2];
+	ivec[0].iov_base=buf.beginWrite();
+	ivec[0].iov_len=buf.writableSize();
+	ivec[1].iov_base=extrabuf;
+	ivec[1].iov_len=sizeof extrabuf;
+	ssize_t nr=readv(fd, ivec, ivcnt);
 	
+	if(nr<0)
+	{
+		fprintf(stderr, "readv error:%s", strerror(errno));
+	}
+	else if(nr>buf.writableSize())
+	{
+		buf.append(extrabuf, nr-buf.writableSize());
+	}
+	
+	delete extrabuf;
+	return nr;
 }
 
 /*
-ssize_t Write(int fd, Buffer &buf, int nbytes)
+ssize_t Send(int fd, Buffer &buf, int nbytes)
 {
 	if(nbytes > buf.size())
 		return -1;
@@ -86,11 +104,13 @@ ssize_t Write(int fd, Buffer &buf, int nbytes)
 	return nbytes-nleft;
 }*/
 
+// 客户调用写函数，将buf的nbytes字节写到fd，从buf的readerIndex_开始读出来写到fd中
 // 模仿muduo的做法，减少拷贝：
-ssize_t Write(int fd, Buffer &buf, int nbytes)
+ssize_t Send(int fd, Buffer &buf, int nbytes)
 {
-	if(nbytes > buf.size())
-		return -1;
+	if(nbytes > buf.readableSize())
+		nbytes = buf.readableSize();
+	
 	char b[512];
 	int tw, nleft, nw;
 	
@@ -101,10 +121,16 @@ ssize_t Write(int fd, Buffer &buf, int nbytes)
 	while(nleft>0)
 	{
 		 // Muduo 应用层buffer的做法：从buffer中全部取出来，试图一次性写，将nleft再 放回buffer去
-		//nw=write(fd, buf.data(), buf.size()); 
-		nw=write(fd, buf.data()+tw, nleft); // 不 拷贝
+		nw=write(fd, buf.beginRead()+tw, nleft); // 不 拷贝
 		if(nw<0)
-			break;
+		{
+			//break; 
+			buf.haveRead(tw);
+			return -1;
+		}
+		// write出错的处理？？
+		// 若 已经 write成功了 一部分，返回出错，更新buffer
+		// 若第一次write出错，返回出错，更新buffer不变
 		else if(nw<nleft)
 		{
 			
@@ -113,9 +139,11 @@ ssize_t Write(int fd, Buffer &buf, int nbytes)
 		tw+=nw;
 		nleft-=nw;
 	}
-	// 当源 和目的 重叠， 使用std::copy() ，不能从前面 移到 后面，这里 从后面移到前面
-	std::copy(buf.data(), nleft, buf.data()); // 将 剩下的字节 移到开头
-	return nbytes-nleft; // return tw;
+	// 当源 和目的 重叠， 由于std::copy()实现是从前往后依序拷贝的 ，不能从前面copy到后面，这里 从后面copy到前面
+	//std::copy(buf.data(), nleft, buf.data()); // 将 剩下的字节 移到开头
+	//更新readerIndex_的位置：
+	buf.hasRead(tw);
+	return tw;
 }
 
 
@@ -128,10 +156,10 @@ void do_epoll(int listenfd)
 	int addrlen=sizeof(addr);
 	struct epoll_event evt;
 	//char buf[512];
-	Buffer buf;
+	Buffer buf(512);
 	
 	
-	efd=epoll_create(epollsize);
+	efd=epoll_create(EPOLLEVENTS);
 	// efd=epoll_create(1);
 	if(efd==-1)
 	{
@@ -183,7 +211,7 @@ void do_epoll(int listenfd)
 			{
 				
 				//ssize_t nr=read(fd, buf, sizeof buf);
-				ssize_t nr=Read(fd, buf); // 读到应用层 buffer的策略是：
+				ssize_t nr=Recv(fd, buf); // 读到应用层 buffer的策略是：
 				// append到 buf末尾
 				if(nw==-1) // EPOLLERR 是否排除错误？？
 				{
@@ -199,7 +227,7 @@ void do_epoll(int listenfd)
 			else if(evts  & EPOLLOUT) // 连接上数据可写
 			{
 				//ssize_t nw=write(fd, buf, nr);
-				ssize_t nw=Write(fd, buf, nr); // 写 应用层buffer 的策略是：
+				ssize_t nw=Send(fd, buf, nr); // 写 应用层buffer 的策略是：
 				// 写出 nw 字节到fd，若 出错，buffer不变，若 正常，丢掉 buffer的开头nw字节
 				if(nw==-1)
 				{
@@ -224,4 +252,53 @@ void do_epoll(int listenfd)
 			}
 		}
 	}
+}
+
+
+//domain：communication domain（本地通信AF_UNIX、IPv4 AF_INET、IPv6 AF_INET6等）
+//        选择用来通信的协议族
+// type: 指定 通信semantics（流、数据报、SOCK_SEQPACKET等）
+// protocol: 指定socket使用的特定协议，通常一个协议族中只有一个协议支持特定的socket type，可指定为0
+//			
+void Socket(int domain, int type, int protocol)
+{
+	int ret=socket(AF_INET, SOCK_STREAM, 0);
+	if(listenfd<0)
+	{ 
+		fprintf(stderr, "socket error: %s", strerror(errno));
+		abort();
+	}
+}
+
+void Bind(int listenfd, struct sockaddr *sa, socklen_t len)
+{
+	int ret=bind(listenfd, sa, len);
+	if(ret<0)
+	{
+		fprintf(stderr, "bind error:%s" , strerror(errno));
+		abort();
+	}
+}
+
+
+typedef struct sockaddr SA;
+
+int main()
+{
+	int listenfd;
+	struct sockaddr_in serveraddr;
+	int LISTENQ=20;
+	
+	listenfd=Socket(AF_INET, SOCK_STREAM, 0);
+
+	
+	bzero(&serveraddr, sizeof serveraddr);
+	serveraddr.sin_family=AF_INET;
+	serveraddr.sin_addr.s_addr=htonl(INADDR_ANY);
+	serveraddr.sin_port=htons(SERV_PORT);
+	
+	Bind(listenfd, (SA*)&serveraddr, sizeof serveraddr);
+	
+	
+	listen(listenfd, LISTENQ);
 }
