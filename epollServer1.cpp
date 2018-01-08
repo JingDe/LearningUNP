@@ -45,6 +45,7 @@ int main()
 	
 	Listen(listenfd, LISTENQ);
 	
+	fprintf(stdout, "do_epoll...\n");
 	do_epoll(listenfd);
 	
 	return 0;
@@ -215,6 +216,7 @@ void do_epoll(int listenfd)
 	while(true)
 	{
 		nready=epoll_wait(efd, events, EPOLLEVENTS, -1);
+		fprintf(stdout, "nready=%d\n", nready);
 		
 		if(nready<0)
 		{
@@ -224,6 +226,7 @@ void do_epoll(int listenfd)
 		
 		for (int i=0; i<nready; i++)
 		{
+			fprintf(stdout, "No.%d\n", i);
 			int fd=events[i].data.fd;
 			uint32_t evts=events[i].events;
 			
@@ -236,6 +239,7 @@ void do_epoll(int listenfd)
 			
 			if((fd==listenfd)  &&  (evts & EPOLLIN)) // 有新的连接请求
 			{
+				fprintf(stdout, "	new connection\n");
 				int connfd=accept(listenfd, (struct sockaddr*) &addr, &addrlen);
 				if(connfd<0)
 				{
@@ -249,10 +253,10 @@ void do_epoll(int listenfd)
 			}
 			else if (evts & EPOLLIN) // 连接上数据可读
 			{
-				
+				fprintf(stdout, "	EPOLLIN\n");
 				//ssize_t nr=read(fd, buf, sizeof buf);
-				ssize_t nr=Recv(fd, buf); // 读到应用层 buffer的策略是：
-				// append到 buf末尾
+				ssize_t nr=Recv(fd, buf); // 读到应用层 buffer的策略是：append到 buf末尾
+				fprintf(stdout, "nr=Recv : %d\n", nr);
 				if(nr==-1) // EPOLLERR 是否排除错误？？
 				{
 					fprintf(stderr, "read error: %s\n", strerror(errno));
@@ -262,10 +266,13 @@ void do_epoll(int listenfd)
 				// 一种做法： 将fd添加为 等待写事件, 写回fd
 				evt.events=EPOLLOUT;
 				evt.data.fd=fd;
+				fprintf(stdout, "epoll_ctl_mod\n");
 				epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
+				
 			}
 			else if(evts  & EPOLLOUT) // 连接上数据可写
 			{
+				fprintf(stdout, "	EPOLLOUT\n");
 				//ssize_t nw=write(fd, buf, nr);
 				ssize_t nw=Send(fd, buf, buf.readableSize()); // 写 应用层buffer 的策略是：
 				// 写出 nw 字节到fd，若 出错，buffer不变，若 正常，丢掉 buffer的开头nw字节
@@ -288,6 +295,7 @@ void do_epoll(int listenfd)
 			}
 			else // ？？
 			{
+				fprintf(stdout, "	unknown\n");
 				fprintf(stderr, "fd=%d, evts=%d\n", fd, evts);
 			}
 		}
