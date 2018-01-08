@@ -1,6 +1,10 @@
 #ifndef MY_BUFFER2_H
 #define MY_BUFFER2_H
 
+#include<cstdio>
+#include<vector>
+#include<sys/types.h>
+#include<sys/socket.h>
 
 /// +-------------------+------------------+------------------+
 /// |    empty bytes    |  readable bytes  |  writable bytes  |
@@ -12,11 +16,13 @@
 
 class Buffer{
 public:
-	static const size_t kInitialSize = 1024;
+	static const std::size_t kInitialSize = 1024;
 
 	// vector构造函数 explicit vector( size_type count );
 	Buffer():data_(kInitialSize), readerIndex_(0),writerIndex_(0)
 	{} 
+	Buffer(int size):data_(size), readerIndex_(0),writerIndex_(0)
+	{}
 	
 	char* data()
 	{ return &*data_.begin(); } 
@@ -28,13 +34,13 @@ public:
 	char* beginWrite()
 	{ return &*data_.begin()+writerIndex_; }
 	
-	size_t readableSize() const
+	std::size_t readableSize() const
 	{ return writerIndex_ - readerIndex_; }
-	size_t writableSize() const
+	std::size_t writableSize() const
 	{ return data_.size()-writerIndex_; } // vector.size() 不是capacity()
 	
-	void retrieve(const char *buf, size_t len);
-	void append(const char* data, size_t len);
+	void retrieve(const char *buf, std::size_t len);
+	void append(const char* data, std::size_t len);
 	
 	// void readFd(int fd); 
 	// muduo 的readFd 采用 另外分配足够大的 char extrabuf[65535], 使用 readv 读取
@@ -44,11 +50,11 @@ public:
 	//    若栈上空间紧张，可使用 thread local的extrabuf？？
 	// 另一种做法， 先调用 ioctl FIONREAD 获得 缓冲区有多少字节，决定是否需要extrabuf
 	
-	void hasRead(size_t n);
+	void hasRead(std::size_t n);
 	
 		
 private:
-	void ensureWritable(size_t len);
+	void ensureWritable(std::size_t len);
 	void refresh();
 	
 	

@@ -1,15 +1,55 @@
 
 #include"Buffer2.h"
+#include<cstdio>
+#include<cstdlib>
+#include<unistd.h>
+#include<sys/types.h>
+#include<sys/socket.h>
+#include<netinet/in.h>
 #include<sys/epoll.h>
-#include<string.h>
+#include<cstring>
+#include<sys/ioctl.h>
+#include<errno.h>
 
 
 const static int EPOLLEVENTS=50;
 const static int SERV_PORT=2018;
 
-// 实现 Read 和Write 函数
+
 ssize_t Recv(int fd, Buffer &buf); // Buffer *buf
 ssize_t Send(int fd, Buffer &buf, int n); // Buffer *buf
+int Socket(int domain, int type, int protocol);
+void Bind(int listenfd, struct sockaddr *sa, socklen_t len);
+void Listen(int listenfd, int backlog);
+void do_epoll(int listenfd);
+
+
+typedef struct sockaddr SA;
+
+int main()
+{
+	int listenfd;
+	struct sockaddr_in serveraddr;
+	int LISTENQ=20;
+	
+	listenfd=Socket(AF_INET, SOCK_STREAM, 0);
+
+	
+	bzero(&serveraddr, sizeof serveraddr);
+	serveraddr.sin_family=AF_INET;
+	serveraddr.sin_addr.s_addr=htonl(INADDR_ANY);
+	serveraddr.sin_port=htons(SERV_PORT);
+	
+	Bind(listenfd, (SA*)&serveraddr, sizeof serveraddr);
+	
+	
+	Listen(listenfd, LISTENQ);
+	
+	do_epoll(listenfd);
+	
+	return 0;
+}
+
 
 /*
 ssize_t Recv(int fd, Buffer &buf)
@@ -67,7 +107,7 @@ ssize_t Recv(int fd, Buffer &buf) // 此函数 可以 用 Buffer.readFd() 替代
 	
 	if(nr<0)
 	{
-		fprintf(stderr, "readv error:%s", strerror(errno));
+		fprintf(stderr, "readv error:%s\n", strerror(errno));
 	}
 	else if(nr>buf.writableSize())
 	{
@@ -111,7 +151,7 @@ ssize_t Send(int fd, Buffer &buf, int nbytes)
 	if(nbytes > buf.readableSize())
 		nbytes = buf.readableSize();
 	
-	char b[512];
+	//char b[512];
 	int tw, nleft, nw;
 	
 	nw=0;
@@ -125,7 +165,7 @@ ssize_t Send(int fd, Buffer &buf, int nbytes)
 		if(nw<0)
 		{
 			//break; 
-			buf.haveRead(tw);
+			buf.hasRead(tw);
 			return -1;
 		}
 		// write出错的处理？？
@@ -152,8 +192,8 @@ void do_epoll(int listenfd)
 	int efd;
 	int nready;
 	struct epoll_event events[EPOLLEVENTS];
-	struct sockadd_in addr;
-	int addrlen=sizeof(addr);
+	struct sockaddr_in addr;
+	socklen_t addrlen=sizeof(addr);
 	struct epoll_event evt;
 	//char buf[512];
 	Buffer buf(512);
@@ -163,7 +203,7 @@ void do_epoll(int listenfd)
 	// efd=epoll_create(1);
 	if(efd==-1)
 	{
-		fprintf(strerr, "epoll_create failed: %s", strerror(errno));
+		fprintf(stderr, "epoll_create failed: %s\n", strerror(errno));
 		return;
 	}
 	
@@ -178,7 +218,7 @@ void do_epoll(int listenfd)
 		
 		if(nready<0)
 		{
-			fprintf(stderr, "epoll_wait error: %s", strerror(errno));
+			fprintf(stderr, "epoll_wait error: %s\n", strerror(errno));
 			return ;
 		}
 		
@@ -190,7 +230,7 @@ void do_epoll(int listenfd)
 			// 判断 错误事件
 			if( (evts & EPOLLERR)  ||  (evts & EPOLLHUP) )
 			{
-				fspritf(stderr, "EPOLLERR  | EPOLLHUP");
+				fprintf(stderr, "EPOLLERR  | EPOLLHUP\n");
 				continue;
 			}
 			
@@ -199,7 +239,7 @@ void do_epoll(int listenfd)
 				int connfd=accept(listenfd, (struct sockaddr*) &addr, &addrlen);
 				if(connfd<0)
 				{
-					fprintf(stderr, "accept error: %s", strerror(errno));
+					fprintf(stderr, "accept error: %s\n", strerror(errno));
 					perror("accept error");
 					return ;
 				}
@@ -213,9 +253,9 @@ void do_epoll(int listenfd)
 				//ssize_t nr=read(fd, buf, sizeof buf);
 				ssize_t nr=Recv(fd, buf); // 读到应用层 buffer的策略是：
 				// append到 buf末尾
-				if(nw==-1) // EPOLLERR 是否排除错误？？
+				if(nr==-1) // EPOLLERR 是否排除错误？？
 				{
-					fprintf(stderr, "read error: %s", strerror(errno));
+					fprintf(stderr, "read error: %s\n", strerror(errno));
 					// 删除 该 读事件
 				}
 				// 一种做法，写到stdout，写回fd
@@ -227,14 +267,14 @@ void do_epoll(int listenfd)
 			else if(evts  & EPOLLOUT) // 连接上数据可写
 			{
 				//ssize_t nw=write(fd, buf, nr);
-				ssize_t nw=Send(fd, buf, nr); // 写 应用层buffer 的策略是：
+				ssize_t nw=Send(fd, buf, buf.readableSize()); // 写 应用层buffer 的策略是：
 				// 写出 nw 字节到fd，若 出错，buffer不变，若 正常，丢掉 buffer的开头nw字节
 				if(nw==-1)
 				{
-					fprintf(stderr, "write error: %s", strerror(errno));
+					fprintf(stderr, "write error: %s\n", strerror(errno));
 					// 删除 该 写事件
 				}
-				else if(nw<nr)
+				else if(nw<buf.readableSize())
 				{
 					// 如何处理？ 自定义 应用层buffer
 				}
@@ -242,13 +282,13 @@ void do_epoll(int listenfd)
 				{
 					// 将 写事件 改成读事件
 					evt.events=EPOLLIN;
-					evt.data.fd=connfd;
-					epoll_ctl(epfd, EPOLL_CTL_MOD, fd, &evt);
+					evt.data.fd=fd;
+					epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
 				}
 			}
 			else // ？？
 			{
-				fprintf(stderr, "fd=%d, evts=%d", fd, evts);
+				fprintf(stderr, "fd=%d, evts=%d\n", fd, evts);
 			}
 		}
 	}
@@ -260,14 +300,15 @@ void do_epoll(int listenfd)
 // type: 指定 通信semantics（流、数据报、SOCK_SEQPACKET等）
 // protocol: 指定socket使用的特定协议，通常一个协议族中只有一个协议支持特定的socket type，可指定为0
 //			
-void Socket(int domain, int type, int protocol)
+int Socket(int domain, int type, int protocol)
 {
-	int ret=socket(AF_INET, SOCK_STREAM, 0);
+	int listenfd=socket(AF_INET, SOCK_STREAM, 0);
 	if(listenfd<0)
 	{ 
-		fprintf(stderr, "socket error: %s", strerror(errno));
+		fprintf(stderr, "socket error: %s\n", strerror(errno));
 		abort();
 	}
+	return listenfd;
 }
 
 void Bind(int listenfd, struct sockaddr *sa, socklen_t len)
@@ -275,30 +316,17 @@ void Bind(int listenfd, struct sockaddr *sa, socklen_t len)
 	int ret=bind(listenfd, sa, len);
 	if(ret<0)
 	{
-		fprintf(stderr, "bind error:%s" , strerror(errno));
+		fprintf(stderr, "bind error:%s\n" , strerror(errno));
 		abort();
 	}
 }
 
-
-typedef struct sockaddr SA;
-
-int main()
+void Listen(int listenfd, int backlog)
 {
-	int listenfd;
-	struct sockaddr_in serveraddr;
-	int LISTENQ=20;
-	
-	listenfd=Socket(AF_INET, SOCK_STREAM, 0);
-
-	
-	bzero(&serveraddr, sizeof serveraddr);
-	serveraddr.sin_family=AF_INET;
-	serveraddr.sin_addr.s_addr=htonl(INADDR_ANY);
-	serveraddr.sin_port=htons(SERV_PORT);
-	
-	Bind(listenfd, (SA*)&serveraddr, sizeof serveraddr);
-	
-	
-	listen(listenfd, LISTENQ);
+	int ret=listen(listenfd, backlog);
+	if(ret<0)
+	{
+		fprintf(stderr, "listen error:%s\n", strerror(errno));
+		abort();
+	}
 }
