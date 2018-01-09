@@ -51,11 +51,14 @@ public:
 	// 另一种做法， 先调用 ioctl FIONREAD 获得 缓冲区有多少字节，决定是否需要extrabuf
 	
 	void hasRead(std::size_t n);
+	void hasWritten(std::size_t n);
 	
+	void reportBuffer();
 		
 private:
 	void ensureWritable(std::size_t len);
 	void refresh();
+	
 	
 	
 	std::vector<char> data_;

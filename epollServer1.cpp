@@ -21,8 +21,12 @@ ssize_t Send(int fd, Buffer &buf, int n); // Buffer *buf
 int Socket(int domain, int type, int protocol);
 void Bind(int listenfd, struct sockaddr *sa, socklen_t len);
 void Listen(int listenfd, int backlog);
-void do_epoll(int listenfd);
+int Epoll_create(int size);
 
+void do_epoll(int listenfd);
+void handle_newConnection(int listenfd, const struct sockaddr_in &addr, socklen_t addrlen, int efd);
+void handle_read(int fd, Buffer& buf, int efd);
+void handle_send(int fd, Buffer& buf, int efd);
 
 typedef struct sockaddr SA;
 
@@ -34,6 +38,8 @@ int main()
 	
 	listenfd=Socket(AF_INET, SOCK_STREAM, 0);
 
+	int optval=1;
+	setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &optval, static_cast<socklen_t>(sizeof optval));
 	
 	bzero(&serveraddr, sizeof serveraddr);
 	serveraddr.sin_family=AF_INET;
@@ -76,12 +82,13 @@ ssize_t Recv(int fd, Buffer &buf)
 // 减少 拷贝
 ssize_t Recv(int fd, Buffer &buf) // 此函数 可以 用 Buffer.readFd() 替代，main函数中 调用Read() 或 readFd() 
 {
+	buf.reportBuffer();
 	// muduo 采用 inputBuffer_.readFd(channel_->fd(), &savedErrno)
 	// muduo 的readFd 采用 另外分配足够大的 char extrabuf[65535], 使用 readv 读取
 	// 另一种做法， 先调用 ioctl FIONREAD读取硬件状态寄存器的数值, 获得 缓冲区有多少字节，决定是否需要extrabuf
 	int nbytes;
 	int ret=ioctl(fd, FIONREAD, &nbytes);
-	char *extrabuf;
+	char *extrabuf=NULL;
 	int ivcnt;
 	if(ret<0) // ??ioctl何时失败
 	{
@@ -99,6 +106,9 @@ ssize_t Recv(int fd, Buffer &buf) // 此函数 可以 用 Buffer.readFd() 替代
 		extrabuf=new char[nbytes];
 		ivcnt=2;
 	}
+	
+	fprintf(stdout, "nbytes=%d, ivcnt=%d\n", nbytes, ivcnt);
+	
 	struct iovec ivec[2];
 	ivec[0].iov_base=buf.beginWrite();
 	ivec[0].iov_len=buf.writableSize();
@@ -106,16 +116,27 @@ ssize_t Recv(int fd, Buffer &buf) // 此函数 可以 用 Buffer.readFd() 替代
 	ivec[1].iov_len=sizeof extrabuf;
 	ssize_t nr=readv(fd, ivec, ivcnt);
 	
+	fprintf(stdout, "readv: %d\n", nr);
+	
 	if(nr<0)
 	{
 		fprintf(stderr, "readv error:%s\n", strerror(errno));
 	}
 	else if(nr>buf.writableSize())
 	{
+		buf.hasWritten(buf.writableSize());
 		buf.append(extrabuf, nr-buf.writableSize());
 	}
+	else
+	{
+		buf.hasWritten(nr);
+	}
 	
-	delete extrabuf;
+	
+	if(extrabuf)
+		delete extrabuf;
+	
+	buf.reportBuffer();
 	return nr;
 }
 
@@ -188,6 +209,18 @@ ssize_t Send(int fd, Buffer &buf, int nbytes)
 }
 
 
+int Epoll_create(int size)
+{
+	int efd=epoll_create(size);
+	// efd=epoll_create(1);
+	if(efd==-1)
+	{
+		fprintf(stderr, "epoll_create failed: %s\n", strerror(errno));
+		abort();
+	}
+	return efd;
+}
+
 void do_epoll(int listenfd)
 {
 	int efd;
@@ -198,25 +231,18 @@ void do_epoll(int listenfd)
 	struct epoll_event evt;
 	//char buf[512];
 	Buffer buf(512);
-	
-	
-	efd=epoll_create(EPOLLEVENTS);
-	// efd=epoll_create(1);
-	if(efd==-1)
-	{
-		fprintf(stderr, "epoll_create failed: %s\n", strerror(errno));
-		return;
-	}
-	
+		
+	efd=Epoll_create(EPOLLEVENTS);
 	
 	evt.events=EPOLLIN;
 	evt.data.fd=listenfd;
 	epoll_ctl(efd, EPOLL_CTL_ADD, listenfd, &evt);
 	
+	
 	while(true)
 	{
 		nready=epoll_wait(efd, events, EPOLLEVENTS, -1);
-		fprintf(stdout, "nready=%d\n", nready);
+		fprintf(stdout, "\n\nnready=%d\n", nready);
 		
 		if(nready<0)
 		{
@@ -230,7 +256,9 @@ void do_epoll(int listenfd)
 			int fd=events[i].data.fd;
 			uint32_t evts=events[i].events;
 			
-			// 判断 错误事件
+			fprintf(stdout, "fd=%d, evts=%d\n", fd, evts);
+			
+			
 			if( (evts & EPOLLERR)  ||  (evts & EPOLLHUP) )
 			{
 				fprintf(stderr, "EPOLLERR  | EPOLLHUP\n");
@@ -239,69 +267,85 @@ void do_epoll(int listenfd)
 			
 			if((fd==listenfd)  &&  (evts & EPOLLIN)) // 有新的连接请求
 			{
-				fprintf(stdout, "	new connection\n");
-				int connfd=accept(listenfd, (struct sockaddr*) &addr, &addrlen);
-				if(connfd<0)
-				{
-					fprintf(stderr, "accept error: %s\n", strerror(errno));
-					perror("accept error");
-					return ;
-				}
-				evt.events=EPOLLIN;
-				evt.data.fd=connfd;
-				epoll_ctl(efd, EPOLL_CTL_ADD, connfd, &evt);
+				handle_newConnection(listenfd, addr, addrlen, efd);
 			}
 			else if (evts & EPOLLIN) // 连接上数据可读
 			{
-				fprintf(stdout, "	EPOLLIN\n");
-				//ssize_t nr=read(fd, buf, sizeof buf);
-				ssize_t nr=Recv(fd, buf); // 读到应用层 buffer的策略是：append到 buf末尾
-				fprintf(stdout, "nr=Recv : %d\n", nr);
-				if(nr==-1) // EPOLLERR 是否排除错误？？
-				{
-					fprintf(stderr, "read error: %s\n", strerror(errno));
-					// 删除 该 读事件
-				}
-				// 一种做法，写到stdout，写回fd
-				// 一种做法： 将fd添加为 等待写事件, 写回fd
-				evt.events=EPOLLOUT;
-				evt.data.fd=fd;
-				fprintf(stdout, "epoll_ctl_mod\n");
-				epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
-				
+				handle_read(fd, buf, efd);				
 			}
 			else if(evts  & EPOLLOUT) // 连接上数据可写
 			{
-				fprintf(stdout, "	EPOLLOUT\n");
-				//ssize_t nw=write(fd, buf, nr);
-				ssize_t nw=Send(fd, buf, buf.readableSize()); // 写 应用层buffer 的策略是：
-				// 写出 nw 字节到fd，若 出错，buffer不变，若 正常，丢掉 buffer的开头nw字节
-				if(nw==-1)
-				{
-					fprintf(stderr, "write error: %s\n", strerror(errno));
-					// 删除 该 写事件
-				}
-				else if(nw<buf.readableSize())
-				{
-					// 如何处理？ 自定义 应用层buffer
-				}
-				else
-				{
-					// 将 写事件 改成读事件
-					evt.events=EPOLLIN;
-					evt.data.fd=fd;
-					epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
-				}
+				handle_send(fd, buf, efd);
 			}
-			else // ？？
+			else 
 			{
-				fprintf(stdout, "	unknown\n");
-				fprintf(stderr, "fd=%d, evts=%d\n", fd, evts);
+				fprintf(stdout, "unknown situation\n");
+				//fprintf(stderr, "fd=%d, evts=%d\n", fd, evts);
 			}
 		}
 	}
 }
 
+
+void handle_newConnection(int listenfd, const struct sockaddr_in &addr, socklen_t addrlen, int efd)
+{
+	fprintf(stdout, "new connection\n");
+	int connfd=accept(listenfd, (struct sockaddr*) &addr, &addrlen);
+	if(connfd<0)
+	{
+		//fprintf(stderr, "accept error: %s\n", strerror(errno));
+		perror("accept error");
+		return ;
+	}
+	struct epoll_event evt;
+	evt.events=EPOLLIN;
+	evt.data.fd=connfd;
+	epoll_ctl(efd, EPOLL_CTL_ADD, connfd, &evt);
+}
+
+void handle_read(int fd, Buffer& buf, int efd)
+{
+	fprintf(stdout, "EPOLLIN\n");
+	//ssize_t nr=read(fd, buf, sizeof buf);
+	ssize_t nr=Recv(fd, buf); // 读到应用层 buffer的策略是：append到 buf末尾
+	fprintf(stdout, "nr=Recv : %d\n", nr);
+	if(nr==-1) // EPOLLERR 是否排除错误？？
+	{
+		fprintf(stderr, "Recv error: %s\n", strerror(errno));
+		// 删除 该 读事件
+	}
+	// 一种做法，写到stdout，写回fd
+	// 一种做法： 将fd添加为 等待写事件, 写回fd
+	struct epoll_event evt;
+	evt.events=EPOLLOUT;
+	evt.data.fd=fd;
+	epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
+}
+
+void handle_send(int fd, Buffer& buf, int efd)
+{
+	fprintf(stdout, "EPOLLOUT\n");
+	//ssize_t nw=write(fd, buf, nr);
+	ssize_t nw=Send(fd, buf, buf.readableSize()); // 写 应用层buffer 的策略是：
+	// 写出 nw 字节到fd，若 出错，buffer不变，若 正常，丢掉 buffer的开头nw字节
+	if(nw==-1)
+	{
+		fprintf(stderr, "Send error: %s\n", strerror(errno));
+		// 删除 该 写事件
+	}
+	else if(nw<buf.readableSize())
+	{
+		//仍然等待 EPOLLOUT
+	}
+	else
+	{
+		// 将 写事件 改成 读事件
+		struct epoll_event evt;
+		evt.events=EPOLLIN;
+		evt.data.fd=fd;
+		epoll_ctl(efd, EPOLL_CTL_MOD, fd, &evt);
+	}
+}
 
 //domain：communication domain（本地通信AF_UNIX、IPv4 AF_INET、IPv6 AF_INET6等）
 //        选择用来通信的协议族

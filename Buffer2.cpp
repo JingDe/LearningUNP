@@ -11,6 +11,7 @@ void Buffer::append(const char* data, std::size_t len)
 {
 	ensureWritable(len);
 	std::copy(data, data+len, beginWrite());
+	hasWritten(len);
 }
 
 void Buffer::ensureWritable(std::size_t len)
@@ -32,13 +33,19 @@ void Buffer::ensureWritable(std::size_t len)
 	}
 }
 
-void Buffer::hasRead(std::size_t n)
+void Buffer::hasRead(std::size_t n) // read  对应 muduo的retrieve
 {
 	int nleft=readableSize()-n;
 	assert(readerIndex_+n<=writerIndex_);
-	std::copy(beginRead()+n, beginRead()+n+nleft, data());
+	//std::copy(beginRead()+n, beginRead()+n+nleft, data());
+	std::copy(beginRead()+n, beginWrite(), data());
 	readerIndex_=0;
 	writerIndex_=nleft;
+}
+
+void Buffer::hasWritten(std::size_t n)
+{
+	writerIndex_+=n;
 }
 
 void Buffer::refresh()
@@ -48,4 +55,9 @@ void Buffer::refresh()
 	readerIndex_=0;
 	writerIndex_=readable;
 	//assert(readable==readableSize());
+}
+
+void Buffer::reportBuffer()
+{
+	fprintf(stdout, "BUFFER: readerIndex=%d, writerIndex=%d, writableSize=%d\n", readerIndex_, writerIndex_, readableSize());
 }
