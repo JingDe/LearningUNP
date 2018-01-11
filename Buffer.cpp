@@ -1,4 +1,4 @@
-#include"Buffer2.h"
+#include"Buffer.h"
 #include<cassert>
 
 void Buffer::retrieve(const char *buf, std::size_t len)
@@ -60,4 +60,11 @@ void Buffer::refresh()
 void Buffer::reportBuffer()
 {
 	fprintf(stdout, "BUFFER: readerIndex=%d, writerIndex=%d, writableSize=%d\n", readerIndex_, writerIndex_, readableSize());
+	fprintf(stdout, "[%s]\n", toString().c_str());
+}
+
+
+std::string Buffer::toString()
+{
+	return std::string(data(), readableSize());
 }

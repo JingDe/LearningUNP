@@ -1,10 +1,11 @@
-#ifndef MY_BUFFER2_H
-#define MY_BUFFER2_H
+#ifndef MY_BUFFER_H
+#define MY_BUFFER_H
 
 #include<cstdio>
 #include<vector>
 #include<sys/types.h>
 #include<sys/socket.h>
+#include<string>
 
 /// +-------------------+------------------+------------------+
 /// |    empty bytes    |  readable bytes  |  writable bytes  |
@@ -54,6 +55,7 @@ public:
 	void hasWritten(std::size_t n);
 	
 	void reportBuffer();
+	std::string toString();
 		
 private:
 	void ensureWritable(std::size_t len);
